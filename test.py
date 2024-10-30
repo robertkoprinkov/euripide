@@ -12,12 +12,14 @@ kernel = kernels.gaussian_kernel(params={'sigma': 25., 'theta': 0.2})
 
 # this is going to be a problem, the knots. We will need an adaptive approach because we don't know a priori
 # how the knots will be distributed. Maybe even something like multigrid.
-boundedGP = BoundedGP.BoundedGP(50, 0., 1., kernel, interpol_x, interpol_y, lowerbound=lowerbound, upperbound=upperbound)
+boundedGP = BoundedGP.BoundedGP(50, 0., 1., kernel, interpol_x, interpol_y, lowerbound=lowerbound, upperbound=upperbound, nugget_interpol=1e-3)
 
 mean_knots, var_knots = boundedGP.statistics_prior()
 #sample = boundedGP.sample_interpolation(sample_pts)
 
 mean, var = boundedGP.statistics_interpolation()
+
+boundedGP.sample_constrained_ET(x_sample=boundedGP.splines.splines_x)
 
 visualize = vis.Visualize()
 

@@ -6,7 +6,7 @@ class Visualize():
     def __init__(self, directory='./img/'):
         self.directory = directory
 
-    def plot_interpolated(self, boundedGP, n_samples=100, filename='interpolated.png'):
+    def plot_interpolated(self, boundedGP, n_samples=100, filename='interpolated.png', return_ax=False):
         fig, ax = plt.subplots(1, 2, figsize=(12, 4), width_ratios=[2, 1])
 
         mean, cov = boundedGP.statistics_interpolation(x=boundedGP.splines.splines_x)
@@ -17,7 +17,7 @@ class Visualize():
         y2, = ax[0].plot(boundedGP.splines.splines_x, mean - 2*cov, color='red', linestyle='--')
         y3, = ax[0].plot(boundedGP.splines.splines_x, mean + 2*cov, color='red', linestyle='--')
         
-        y_sample = boundedGP.sample_interpolation(n_samples=n_samples)
+        y_sample = boundedGP.sample_interpolation(x_sample=boundedGP.splines.splines_x, n_samples=n_samples)
         line_samples = []
         for i in range(n_samples):
             line_samples.append(ax[0].plot(boundedGP.splines.splines_x, y_sample[i, :], color='gray', linestyle='-', linewidth=0.5, alpha=0.3)[0])
@@ -32,25 +32,32 @@ class Visualize():
         ax[1].axis('off')
         
         plt.tight_layout()
-        if filename is None:
-                return fig, ax        
-        else:
+        if filename is not None:
             plt.savefig(self.directory + filename, dpi=300)
-    def plot_constrained(self, boundedGP, n_samples=100, filename='constrained.png'):
+        if return_ax:
+            return fig, ax
+    def plot_constrained(self, boundedGP, n_samples=100, filename='constrained.png', return_ax=False):
         fig, ax = plt.subplots(1, 2, figsize=(12, 4), width_ratios=[2, 1])
 
         mean_constrained, _ = boundedGP.statistics_constrained(boundedGP.splines.splines_x)
         mean_interpol, _ = boundedGP.statistics_interpolation(boundedGP.splines.splines_x)
         phi_T = boundedGP.splines.eval_splines(boundedGP.splines.splines_x)
-        mean_constrained_prior = phi_T @ boundedGP.mean_constrained_prior
+        
         
         y1, = ax[0].plot(boundedGP.splines.splines_x, mean_constrained)
         y2, = ax[0].plot(boundedGP.splines.splines_x, mean_interpol, linestyle='--')
-        y3, = ax[0].plot(boundedGP.splines.splines_x, mean_constrained_prior, linestyle='--')
+        
+        y3 = None
+        if boundedGP.mean_constrained_prior is not None:
+            # sometimes calculating mean with prior fails
+            mean_constrained_prior = phi_T @ boundedGP.mean_constrained_prior
+            y3, = ax[0].plot(boundedGP.splines.splines_x, mean_constrained_prior, linestyle='--')
         y_sample = []
         
         if n_samples is not None:
-            samples = boundedGP.sample_constrained(x_sample=boundedGP.splines.splines_x, n_samples=n_samples)
+            #samples = boundedGP.sample_constrained(x_sample=boundedGP.splines.splines_x, n_samples=n_samples)
+            samples = boundedGP.sample_constrained_ET(x_sample=boundedGP.splines.splines_x, n_samples=n_samples)
+            
             for i in range(n_samples):
                 y_sample.append(ax[0].plot(boundedGP.splines.splines_x, samples[i], color='red', linestyle='-', linewidth=0.2, alpha=0.1)[0])
         
@@ -86,8 +93,8 @@ class Visualize():
 
         plt.tight_layout()
 
-        if filename is None:
-            return fig, ax        
-        else:
+        if filename is not None:
             plt.savefig(self.directory + filename, dpi=300)
+        if return_ax:
+            return fig, ax
         

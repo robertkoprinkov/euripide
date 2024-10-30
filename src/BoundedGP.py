@@ -3,6 +3,7 @@ import scipy
 from qpsolvers import solve_qp
 
 from . import splines as splines
+from .minimax_tilting_sampler import TruncatedMVN
 
 class constrainedGP():
     """
@@ -20,12 +21,12 @@ class constrainedGP():
     - The type of truncation on the random variables \\xi, which depends on the role of the random variable, which is defined by its influence function \\phi_i
     """
 
-    def __init__(self, N_splines, x_min, x_max, kernel, interpol_x=None, interpol_y=None, lowerbound=None, upperbound=None, nugget_prior=1e-3, nugget_interpol=1e-6):
+    def __init__(self, N_splines, x_min, x_max, kernel, interpol_x=None, interpol_y=None, lowerbound=None, upperbound=None, nugget_prior=1e-3, nugget_interpol=1e-6, verbose=False):
         self.splines = self.init_splines(N_splines, x_min, x_max)
 
         self.kernel = kernel
 
-        self.mean_prior, self.cov_prior = self.prior(nugget=nugget_prior)
+        self.mean_prior, self.cov_prior = self.prior(nugget=nugget_prior, verbose=verbose)
         
         self.interpol_x = interpol_x
         self.interpol_y = interpol_y
@@ -34,12 +35,38 @@ class constrainedGP():
         self.cov_interpol = None
         
         if self.interpol_x is not None:
-            self.mean_interpol, self.cov_interpol = self.calc_interpolation(interpol_x, interpol_y, nugget=nugget_interpol)
-         
+            self.mean_interpol, self.cov_interpol = self.calc_interpolation(interpol_x, interpol_y, nugget=nugget_interpol, verbose=verbose)
+
+            _, cov_no_nugget = self.calc_interpolation(interpol_x, interpol_y, nugget=None)
+            eigv, eigvec = np.linalg.eigh(cov_no_nugget)
+
+            nonzero = np.abs(eigv) > 1e-9
+            self.map_from_reduced = eigvec.T
+            
+            eigv = eigv[nonzero]
+            eigvec = eigvec[nonzero]
+            self.map_from_reduced = self.map_from_reduced[:, nonzero]
+            
+            print(eigvec.shape)
+            self.cov_interpol_reduced_old = np.diag(eigv) @ (eigvec @ eigvec.T)
+            self.cov_interpol_reduced = self.map_from_reduced.T @ cov_no_nugget @ self.map_from_reduced
+
+            print(np.abs(self.cov_interpol_reduced - self.cov_interpol_reduced.T).max(), 'Diff symmetry')
+            self.cov_interpol_reduced = .5 * self.cov_interpol_reduced + .5*self.cov_interpol_reduced.T
+            print(np.linalg.eigvals(self.cov_interpol_reduced).real.min())
+            # TODO: they should be the same
+            print(np.abs(self.cov_interpol_reduced - self.cov_interpol_reduced_old).max())
         if lowerbound is not None:
             self.constraint_matrix, self.constraints_max_value = self.define_constraints(lowerbound, upperbound)
+            #optim_result_shifted = self.mean_interpol + solve_qp(np.linalg.inv(self.cov_interpol), np.zeros(self.splines.n_splines), self.constraint_matrix, self.constraints_max_value - self.constraint_matrix @ self.mean_interpol, None, None, solver='quadprog', verbose=True)
             optim_result = solve_qp(np.linalg.inv(self.cov_interpol), -self.mean_interpol.T @ np.linalg.inv(self.cov_interpol), self.constraint_matrix, self.constraints_max_value, None, None, solver='quadprog', verbose=True)
 
+            #red_inv = np.linalg.inv(self.cov_interpol_reduced)
+            #red_inv = .5*(red_inv + red_inv.T)
+            #optim_red = self.mean_interpol + self.map_from_reduced @ solve_qp(red_inv, np.zeros(self.cov_interpol_reduced.shape[0]), self.constraint_matrix @ self.map_from_reduced, self.constraints_max_value - self.constraint_matrix @ self.mean_interpol, None, None, solver='quadprog', verbose=True)
+            # shifted gets the same result
+            #print('Max diff', np.abs(optim_result - optim_result_shifted).max(), np.abs(optim_red - optim_result_shifted).max())
+            #print(optim_red)
             # in extreme cases, the prior solver works better
             # for some reason, the posterior one doesn't work in the monotonic case where we have an almost constant stretch
             # the constraint ends up being violated
@@ -50,9 +77,14 @@ class constrainedGP():
                 print('Failed optim prior')
             self.mean_constrained = optim_result
             self.mean_constrained_prior = optim_prior
+            
+            if optim_prior is None:
+                print('Optimization with matrix $\Gamma^N$ failed')
+            else:
+                print('Optim posterior vs prior difference', np.abs(optim_result - optim_prior).max())
 
-            print('Optim posterior vs prior difference', np.abs(optim_result - optim_prior).max())
-
+            lb, ub = self.get_bounds(lowerbound, upperbound)
+            self.ET_sampler = TruncatedMVN(self.mean_interpol, self.cov_interpol, lb, ub)
     """
         Return prior mean and covariance matrices. Must have same dimension as number of RV of representation.
     """
@@ -66,7 +98,13 @@ class constrainedGP():
     """
     def define_constraints(self):
         pass
-    
+
+    """
+        Return the bounds for the RV. Returns two np.arrays, both of size self.splines.n_splines, one specifying the lowerbound
+        of each RV in the internal representation, the other representing the upper bounds.
+    """
+    def get_bounds(self, lowerbound, upperbound):
+        pass
     """
         Return the splines that will be used in this representation
     """
@@ -90,7 +128,7 @@ class constrainedGP():
             cov_noise = cov_interpol + nugget * np.eye(self.splines.n_splines)# np.random.uniform(size=self.cov_interpol.shape)
             
             if verbose:
-                print('[Nugget] added to post-interpolation covariance matrix. Condition number went from %d to %d.' % (np.linalg.cond(cov_interpol), np.linalg.cond(cov_noise)))
+                print('[Nugget] of size %f added to post-interpolation covariance matrix. Condition number went from %d to %d.' % (nugget, np.linalg.cond(cov_interpol), np.linalg.cond(cov_noise)))
                 print('[PosDef] Post-interpolation covariance matrix with nugget:', np.all(np.linalg.eigvals(cov_noise) > 0))
 
             # adding noise does decrease it
@@ -140,10 +178,10 @@ class constrainedGP():
         
     """
     def sample_interpolation(self, x_sample=None, n_samples=1):
-        if x_sample is None:
-            x_sample = self.splines.splines_x
         assert self.mean_interpol is not None and self.cov_interpol is not None
-        RV = np.random.multivariate_normal(self.mean_interpol, self.cov_interpol, n_samples) # dim: self.splines.n_splines x n_samples
+        RV = np.random.multivariate_normal(self.mean_interpol, self.cov_interpol, n_samples) # dim: n_samples x self.splines.n_splines
+        if x_sample is None:
+            return RV
         phi_T = self.splines.eval_splines(x_sample)
         return RV @ phi_T.T
 
@@ -173,10 +211,8 @@ class constrainedGP():
         n_rejected_constraint = 0
         for n_iter in range(100*n_samples):
             potential = np.random.multivariate_normal(self.mean_constrained, self.cov_interpol, n_samples)
-
-            accepted_convex = np.all(np.logical_and(potential[:, 1:] > self.lowerbound, potential[:, 1:] < self.upperbound), axis=1)
-            
-            accepted_convex_new = np.all(potential @ self.constraint_matrix.T < self.constraints_max_value, axis=1)
+          
+            accepted_convex = np.all(potential @ self.constraint_matrix.T < self.constraints_max_value, axis=1)
             
             n_rejected_constraint += n_samples - accepted_convex.sum()
             unif = np.random.uniform(size=n_samples)
@@ -204,7 +240,28 @@ class constrainedGP():
             return samples[:n_accepted, :], {'n_rejected_constraint': n_rejected_constraint, 'n_rejected_neumann': n_rejected-n_rejected_constraint, 'n_accepted': n_accepted}
         else:
             return samples[:n_accepted, :]
-    
+    """
+        @param x_sample: points at which to return the sampled function. If x_sample is None, the original RV used to
+                         represent this finite dimensional approximation to the GP are returned
+    """
+    def sample_constrained_ET(self, x_sample=None, n_samples = 1, return_stats=False, throw_exception_if_failed=True):
+        assert self.mean_interpol is not None and self.cov_interpol is not None
+        assert self.mean_constrained is not None
+
+        phi_T = None
+        if x_sample is not None:
+            phi_T = self.splines.eval_splines(x_sample)
+        # though this isn't an MCMC sampler. I don't think there's any reason to do this.
+        samples = self.ET_sampler.sample(10*n_samples)
+        samples = samples[:, -10*n_samples:]
+        permutation = np.random.permutation(samples.shape[1])
+        samples = samples[:, permutation].T
+
+        if x_sample is not None:
+            samples = samples @ phi_T.T
+        print(samples.shape)
+        return samples[:n_samples, :]
+        
     """
         Evaluate a given realization of the RV xi at new points x_eval
         
@@ -215,7 +272,7 @@ class constrainedGP():
 
 class BoundedGP(constrainedGP):
     
-    def prior(self, nugget=None):
+    def prior(self, nugget=None, verbose=False):
         cov_prior = np.zeros((self.splines.n_splines, self.splines.n_splines))
         mean_prior = np.zeros(self.splines.n_splines)        
         for i in range(self.splines.n_splines):
@@ -225,7 +282,8 @@ class BoundedGP(constrainedGP):
         if nugget is not None:
             old_cond = np.linalg.cond(cov_prior)
             cov_prior = cov_prior + nugget*np.eye(self.splines.n_splines)
-            print('[Nugget] added to prior covariance matrix. Condition number went from %d to %d.' % (old_cond, np.linalg.cond(cov_prior)))
+            if verbose:
+                print('[Nugget] added to prior covariance matrix. Condition number went from %d to %d.' % (old_cond, np.linalg.cond(cov_prior)))
         return mean_prior, cov_prior
     
     def define_constraints(self, lowerbound, upperbound):
@@ -238,13 +296,16 @@ class BoundedGP(constrainedGP):
         constraints_max_value[self.splines.n_splines:] = -lowerbound
         
         return constraint_matrix, constraints_max_value
+
+    def get_bounds(self, lowerbound, upperbound):
+        return lowerbound*np.ones(self.splines.n_splines), upperbound*np.ones(self.splines.n_splines)
     
     def init_splines(self, N_splines, x_min, x_max):
         return splines.hats(N_splines, x_min, x_max)
 
 class MonotonicGP(constrainedGP):
 
-    def prior(self, nugget=None):
+    def prior(self, nugget=None, verbose=False):
         mean_prior = np.zeros(self.splines.n_splines)
         cov_prior = np.zeros((self.splines.n_splines, self.splines.n_splines))
 
@@ -261,8 +322,10 @@ class MonotonicGP(constrainedGP):
 
         if nugget is not None:
             old_cond = np.linalg.cond(cov_prior)
-            cov_prior = cov_prior + 1e-3*np.eye(self.splines.n_splines)
-            print('[Nugget] added to prior covariance matrix. Condition number went from %d to %d.' % (old_cond, np.linalg.cond(cov_prior)))
+            cov_prior = cov_prior + nugget*np.eye(self.splines.n_splines)
+
+            if verbose:
+                print('[Nugget] added to prior covariance matrix. Condition number went from %d to %d.' % (old_cond, np.linalg.cond(cov_prior)))
             
         
         return mean_prior, cov_prior
@@ -281,3 +344,13 @@ class MonotonicGP(constrainedGP):
         
         return constraint_matrix, constraints_max_value
 
+    def get_bounds(self, lowerbound, upperbound):
+        lb = np.ones(self.splines.n_splines)
+        ub = np.ones(self.splines.n_splines)
+
+        lb[0] = -1e-9
+        ub[0] = 1e9
+
+        lb[1:] = lowerbound
+        ub[1:] = upperbound
+        return lb, ub
